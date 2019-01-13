@@ -1,0 +1,263 @@
+#include <Adafruit_GFX.h>
+#include <Max72xxPanel.h>
+#include <Wire.h>
+#include "RTClib.h"
+#include "GyverTimer.h"
+#include <SPI.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_BME280.h>
+#include <BH1750FVI.h>
+
+#define TIME_INTERVAL 4000
+//#define DATE_INTERVAL 10000
+#define TEMPERATURE_INTERVAL 20000
+#define MAX_LUX 4
+#define GOOD 50
+#define BAD -50
+
+enum TapeStates
+{
+  TIME,
+  TEMPERATURE
+};
+
+bool tick = false;
+
+GTimer_ms halfsTimer;
+GTimer_ms drawTimer(1000);
+GTimer_ms lightSensorTimer(200);
+GTimer_ms calculationTimer(1200000);
+
+BH1750FVI lightSensor;
+
+RTC_DS3231 rtc;
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+int pinCS = 9;
+int numberOfHorizontalDisplays = 1; // теперь у нас по-горизонтали 6 матриц
+int numberOfVerticalDisplays = 4; // а по-вертикали, по-прежнему, одна
+
+Adafruit_BME280 bme;
+
+Max72xxPanel matrix = Max72xxPanel(pinCS, numberOfHorizontalDisplays, numberOfVerticalDisplays);
+
+String tape = "HELLO"; // текст, который будет плыть
+int wait = 1000; // время между крайними перемещениями букв
+
+int spacer = 1; // расстояние между буквами
+int width = 5 + spacer; // размер шрифта
+
+TapeStates TapeState;
+
+unsigned long pressure, aver_pressure, pressure_array[6], time_array[6];
+unsigned long sumX, sumY, sumX2, sumXY;
+float a, b;
+int delta;
+
+void setup() {
+  TapeState = TIME;
+  halfsTimer.setInterval(TIME_INTERVAL);
+  halfsTimer.setMode(MANUAL);
+
+  matrix.setRotation(1);
+
+  if (!rtc.begin()) {
+    while (1);
+  }
+
+  if (rtc.lostPower()) {
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  if (!bme.begin()) {
+    Serial.println("Could not find a valid BME280 sensor, check wiring!");
+    while (1);
+  }
+
+  lightSensor.begin();
+  lightSensor.SetAddress(Device_Address_L);
+  lightSensor.SetMode(Continuous_H_resolution_Mode);
+
+  delay(500);
+
+  pressure = aver_sens();          // найти текущее давление по среднему арифметическому
+  for (byte i = 0; i < 6; i++) {   // счётчик от 0 до 5
+    pressure_array[i] = pressure;  // забить весь массив текущим давлением
+    time_array[i] = i;             // забить массив времени числами 0 - 5
+  }
+
+  setTapeText();
+  Draw();
+}
+
+void loop() {
+  if (lightSensorTimer.isReady()) {
+    setMatrixIntensity();
+  }
+
+  if (halfsTimer.isReady()) {
+    setTapeText();
+  }
+
+  if (drawTimer.isReady()) {
+    Draw();
+  }
+
+  if (calculationTimer.isReady()) {
+    calculation();
+  }
+}
+
+void setMatrixIntensity() {
+  int lux = lightSensor.GetLightIntensity();
+  if (lux > MAX_LUX) {
+    lux = MAX_LUX;
+  }
+  int intensity = map(lux, 0, MAX_LUX, 0, 15);
+  intensity = constrain(intensity,  0, 15);
+  matrix.setIntensity(intensity);
+}
+
+void setTapeText() {
+  DateTime now = rtc.now();
+
+  switch (TapeState) {
+    case TIME:
+      tape = getTime(now);
+      TapeState = TEMPERATURE;
+      halfsTimer.setInterval(TEMPERATURE_INTERVAL);
+      break;
+    /*case DATE:
+      tape = getDate(now);
+      TapeState = TEMPERATURE;
+      halfsTimer.setInterval(TEMPERATURE_INTERVAL);
+      break;*/
+    case TEMPERATURE:
+      tape = getTemperature();
+      TapeState = TIME;
+      halfsTimer.setInterval(TIME_INTERVAL);
+      break;
+  }
+  halfsTimer.reset();
+}
+
+void Draw() {
+  int x = 1;
+  int y =  (matrix.height() - 8) / 2;
+
+  for ( int i = 0 ; i < tape.length(); i++ ) {
+
+    if (i == 2 && TapeState == TEMPERATURE) {
+      char symbol;
+      if (!tick) {
+        symbol = ' ';
+      }
+      else {
+        symbol = ':';
+      }
+      tick = !tick;
+      matrix.drawChar(x, y, symbol, HIGH, LOW, 1);
+    }
+    else {
+      matrix.drawChar(x, y, tape[i], HIGH, LOW, 1);
+    }
+
+    matrix.write();
+    x = x + width;
+  }
+}
+
+String getTime(DateTime nowDateTime) {
+  String hourStr;
+  String minuteStr;
+  String timeStr;
+
+  int hourDec = nowDateTime.hour();
+  int minuteDec = nowDateTime.minute();
+
+  if (hourDec < 10) {
+    hourStr = '0' + String(nowDateTime.hour());
+  }
+  else {
+    hourStr = String(nowDateTime.hour());
+  }
+
+  if (minuteDec < 10) {
+    minuteStr = '0' + String(nowDateTime.minute());
+  }
+  else {
+    minuteStr = String(nowDateTime.minute());
+  }
+
+  timeStr = hourStr + ':' + minuteStr;
+  return timeStr;
+}
+
+String getDate(DateTime nowDateTime) {
+  String dateStr = "D:" + String(nowDateTime.month()) + '/' + String(nowDateTime.day());
+  return dateStr;
+}
+
+String getTemperature() {
+  String temperature;
+  int tempDec = bme.readTemperature();
+  if (abs(tempDec) < 10) {
+    temperature = "0" + String(tempDec);
+  }
+  else {
+    temperature = String(tempDec, DEC);
+  }
+
+  if (temperature.length() > 2) {
+    temperature = temperature + " C";
+  } else {
+    String prediction;
+    if (delta > GOOD) {
+      prediction = " :)";
+    }
+    else if (delta < BAD) {
+      prediction = " :(";
+    }
+    else {
+      prediction = " *C";
+    }
+    temperature = temperature + prediction;
+  }
+
+  return temperature;
+}
+
+long aver_sens() {
+  pressure = 0;
+  for (byte i = 0; i < 10; i++) {
+    pressure += bme.readPressure();
+  }
+  aver_pressure = pressure / 10;
+  return aver_pressure;
+}
+
+void calculation() {
+  pressure = aver_sens();                          // найти текущее давление по среднему арифметическому
+  for (byte i = 0; i < 5; i++) {                   // счётчик от 0 до 5 (да, до 5. Так как 4 меньше 5)
+    pressure_array[i] = pressure_array[i + 1];     // сдвинуть массив давлений КРОМЕ ПОСЛЕДНЕЙ ЯЧЕЙКИ на шаг назад
+  }
+  pressure_array[5] = pressure;                    // последний элемент массива теперь - новое давление
+
+  sumX = 0;
+  sumY = 0;
+  sumX2 = 0;
+  sumXY = 0;
+  for (int i = 0; i < 6; i++) {                    // для всех элементов массива
+    sumX += time_array[i];
+    sumY += (long)pressure_array[i];
+    sumX2 += time_array[i] * time_array[i];
+    sumXY += (long)time_array[i] * pressure_array[i];
+  }
+  a = 0;
+  a = (long)6 * sumXY;             // расчёт коэффициента наклона приямой
+  a = a - (long)sumX * sumY;
+  a = (float)a / (6 * sumX2 - sumX * sumX);
+  // Вопрос: зачем столько раз пересчитывать всё отдельными формулами? Почему нельзя считать одной большой?
+  // Ответ: а затем, что ардуинка не хочет считать такие большие числа сразу, и обязательно где-то наё*бывается,
+  // выдавая огромное число, от которого всё идёт по пи*зде. Почему с матами? потому что устал отлаживать >:O
+  delta = a * 6;                   // расчёт изменения давленияt
+}
