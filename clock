@@ -6,14 +6,28 @@
 #include <SPI.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BME280.h>
-#include <BH1750FVI.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 #define TIME_INTERVAL 4000
-//#define DATE_INTERVAL 10000
 #define TEMPERATURE_INTERVAL 20000
-#define MAX_LUX 4
-#define GOOD 50
-#define BAD -50
+#define MAX_LUX 900
+#define GOOD 60
+#define BAD -60
+
+#define FAULT_TEMP_SENSORS 10
+
+// Номер пина Arduino с подключенным датчиком
+#define PIN_DS18B20 2
+
+// Создаем объект OneWire
+OneWire oneWire(PIN_DS18B20);
+
+// Создаем объект DallasTemperature для работы с сенсорами, передавая ему ссылку на объект для работы с 1-Wire.
+DallasTemperature dallasSensors(&oneWire);
+
+// Специальный объект для хранения адреса устройства
+DeviceAddress secondTemperatureSensorAddress;
 
 enum TapeStates
 {
@@ -27,8 +41,9 @@ GTimer_ms halfsTimer;
 GTimer_ms drawTimer(1000);
 GTimer_ms lightSensorTimer(200);
 GTimer_ms calculationTimer(1200000);
+GTimer_ms secondTemperatureSensorRequestTimer(3000);
 
-BH1750FVI lightSensor;
+const int pinPhoto = A0;
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
@@ -54,6 +69,15 @@ float a, b;
 int delta;
 
 void setup() {
+  dallasSensors.begin();
+  dallasSensors.getDeviceCount();
+
+  if (!dallasSensors.getAddress(secondTemperatureSensorAddress, 0)) Serial.println("Не можем найти первое устройство");
+
+  dallasSensors.setResolution(secondTemperatureSensorAddress, 12);
+  dallasSensors.getResolution(secondTemperatureSensorAddress);
+
+  pinMode( pinPhoto, INPUT );
   TapeState = TIME;
   halfsTimer.setInterval(TIME_INTERVAL);
   halfsTimer.setMode(MANUAL);
@@ -72,10 +96,6 @@ void setup() {
     Serial.println("Could not find a valid BME280 sensor, check wiring!");
     while (1);
   }
-
-  lightSensor.begin();
-  lightSensor.SetAddress(Device_Address_L);
-  lightSensor.SetMode(Continuous_H_resolution_Mode);
 
   delay(500);
 
@@ -102,17 +122,25 @@ void loop() {
     Draw();
   }
 
+  if (secondTemperatureSensorRequestTimer.isReady()) {
+    secondTemperatureSensorRequest();
+  }
+
   if (calculationTimer.isReady()) {
     calculation();
   }
 }
 
+void secondTemperatureSensorRequest() {
+  dallasSensors.requestTemperatures();
+}
+
 void setMatrixIntensity() {
-  int lux = lightSensor.GetLightIntensity();
+  int lux = analogRead(pinPhoto);
   if (lux > MAX_LUX) {
     lux = MAX_LUX;
   }
-  int intensity = map(lux, 0, MAX_LUX, 0, 15);
+  int intensity = map(lux, 100, MAX_LUX, 0, 15);
   intensity = constrain(intensity,  0, 15);
   matrix.setIntensity(intensity);
 }
@@ -126,18 +154,18 @@ void setTapeText() {
       TapeState = TEMPERATURE;
       halfsTimer.setInterval(TEMPERATURE_INTERVAL);
       break;
-    /*case DATE:
-      tape = getDate(now);
-      TapeState = TEMPERATURE;
-      halfsTimer.setInterval(TEMPERATURE_INTERVAL);
-      break;*/
     case TEMPERATURE:
       tape = getTemperature();
       TapeState = TIME;
+      ClearDisplay();
       halfsTimer.setInterval(TIME_INTERVAL);
       break;
   }
   halfsTimer.reset();
+}
+
+void ClearDisplay() {
+  matrix.fillScreen(LOW);
 }
 
 void Draw() {
@@ -199,12 +227,25 @@ String getDate(DateTime nowDateTime) {
 
 String getTemperature() {
   String temperature;
-  int tempDec = bme.readTemperature();
-  if (abs(tempDec) < 10) {
-    temperature = "0" + String(tempDec);
+
+  float tempFirst = bme.readTemperature();
+  float tempSecond = dallasSensors.getTempC(secondTemperatureSensorAddress);
+
+  float difference = tempFirst - tempSecond;
+  int minTemperature = 0;
+
+  if (abs(difference) > FAULT_TEMP_SENSORS) {
+    minTemperature = (int)tempFirst;
   }
   else {
-    temperature = String(tempDec, DEC);
+    minTemperature = min(tempFirst, tempSecond);
+  }
+
+  if (abs(minTemperature) < 10) {
+    temperature = "0" + String(minTemperature);
+  }
+  else {
+    temperature = String(minTemperature, DEC);
   }
 
   if (temperature.length() > 2) {
