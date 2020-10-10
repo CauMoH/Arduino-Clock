@@ -9,8 +9,9 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
-#define TIME_INTERVAL 4000
-#define TEMPERATURE_INTERVAL 20000
+#define TIME_INTERVAL 15000
+#define TEMPERATURE_INTERVAL 4000
+#define HUMIDITY_INTERVAL 4000
 #define MAX_LUX 900
 #define GOOD 60
 #define BAD -60
@@ -32,7 +33,8 @@ DeviceAddress secondTemperatureSensorAddress;
 enum TapeStates
 {
   TIME,
-  TEMPERATURE
+  TEMPERATURE,
+  HUMIDITY
 };
 
 bool tick = false;
@@ -152,13 +154,18 @@ void setTapeText() {
     case TIME:
       tape = getTime(now);
       TapeState = TEMPERATURE;
-      halfsTimer.setInterval(TEMPERATURE_INTERVAL);
+      halfsTimer.setInterval(TIME_INTERVAL);
       break;
     case TEMPERATURE:
       tape = getTemperature();
-      TapeState = TIME;
+      TapeState = HUMIDITY;
       ClearDisplay();
-      halfsTimer.setInterval(TIME_INTERVAL);
+      halfsTimer.setInterval(TEMPERATURE_INTERVAL);
+      break;
+    case HUMIDITY:
+      tape = getHumidity();
+      TapeState = TIME;
+      halfsTimer.setInterval(HUMIDITY_INTERVAL);
       break;
   }
   halfsTimer.reset();
@@ -265,6 +272,10 @@ String getTemperature() {
   }
 
   return temperature;
+}
+
+String getHumidity() {
+  return (String)(int)bme.readHumidity() + "  %";
 }
 
 long aver_sens() {
